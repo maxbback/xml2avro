@@ -9,7 +9,7 @@ All root branches are converted to tables, if this contains new branches they ar
 
 For more information and description read the articles behind this code on;
 
-http://max.bback.se/index.php/2018/06/30/xml-to-tables-csv-with-nifi-and-groovy-part-2-of-2/
+http://max.bback.se/index.php/2018/07/16/xml2avro-nifi-processor/
 
 It is very easy to combine this script with my avro script to write avro records instead of csv records.
 
