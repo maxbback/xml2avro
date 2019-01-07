@@ -47,11 +47,16 @@ def getNodes (doc,path) {
 	return node
 }
 
+// translate XML types to avro types
 def getAvroField(fieldName,dataType, canBeNull) {
 	if (dataType == "xs:integer") {
 		dataType = "int"
 	} else if (dataType == "xs:decimal") {
 		dataType = "double"
+	} else if (dataType == "xs:double") {
+			dataType = "double"
+	} else if (dataType == "xs:float") {
+				dataType = "float"
 	} else if (dataType == "xs:long") {
 		dataType = "long"
 	} else if (dataType == "xs:dateTime") {
@@ -71,34 +76,31 @@ def getAvroField(fieldName,dataType, canBeNull) {
 	return field
 }
 
+// trim strings and convert xml text to correct avro data type
 def trimValue(dataType, val) {
 	if (dataType == "xs:decimal") {
 		val = val.toDouble()
+	} else if (dataType == "xs:double") {
+			val = val.toDouble()
+	} else if (dataType == "xs:float") {
+				val = val.toFloat()
 	} else if (dataType == "xs:integer") {
 		val = val.toInteger()
 	} else if (dataType == "xs:dateTime") {
+		// convert it to a timeStamp
 		val = val.toString()
 	}	else if (dataType == "xs:string" || dataType == "xs:token") {
 		val = val.toString()
-		// for string columns we do some trimming
+		// for token columns we do some trimming
 		// we remove all line breaks, just to simplify
 		// we also escape quate character and escape character
 		if (dataType == "xs:token") {
-			log.error(val.toString())
 			val = val.replaceAll('\n',' ')
 			val = val.replaceAll('\r',' ')
 			val = val.replaceAll('\t',' ')
 			val = val.replaceAll('\\s+',' ')
 		}
-/*
-		if (val.contains('\\')) {
-			val = val.replaceAll('\\','\\\\')
-		}
-		if (val.contains('\"')) {
-			val = val.replaceAll('\"','\\\"')
-		}
-		val = val
-*/
+
 	}
 
 	return val
@@ -110,7 +112,7 @@ def myTables = []
 	This function is processing XSD file and is flattning out the fieldStructure
 	into tables
 */
-def showElement(myTables,doc_xml,doc_xsd,element,table,path,colNamePrefix)
+def parseXsdElement(myTables,doc_xsd,element,table,path,colNamePrefix)
 {
 	def nrAttributes = 0
 	def keyAttribute = ""
@@ -169,8 +171,8 @@ def showElement(myTables,doc_xml,doc_xsd,element,table,path,colNamePrefix)
 				newPath.add(it.@name)
 				// recursive iteration to find branches in this branch
 				// we pass current table as the base so it can be extended with columns
-				showElement(myTables,doc_xml,doc_xsd,it,table,newPath,"${colNamePrefix}${it.@name}_")
-
+				parseXsdElement(myTables,doc_xsd,it,table,newPath,"${colNamePrefix}${it.@name}_")
+				//parseXsdElement(myTables,doc_xsd,element,table,path,colNamePrefix)
 			} else {
 				// We have a multi branch so we create a new table for it
 				newtable = new Table()
@@ -200,7 +202,8 @@ def showElement(myTables,doc_xml,doc_xsd,element,table,path,colNamePrefix)
 
 				myTables.add(newtable)
 
-				showElement(myTables,doc_xml,doc_xsd,it,newtable,[],"")
+				parseXsdElement(myTables,doc_xsd,it,newtable,[],"")
+				//parseXsdElement(myTables,doc_xsd,element,table,path,colNamePrefix)
 			}
 		}
 	}
@@ -231,7 +234,8 @@ try {
 		table.columns = []
 		table.path = [it.@name]
 		myTables.add(table)
-		showElement(myTables,doc_xml,doc_xsd,it,table,[],"")
+		parseXsdElement(myTables,doc_xsd,it,table,[],"")
+		//parseXsdElement(myTables,doc_xsd,element,table,path,colNamePrefix)
 	}
 
 	// Lets process the XML file
@@ -247,24 +251,25 @@ try {
 
 	myTables.each
 	{
+		// path should be atleast one, this code can be removed
 		if (it.path.size() == 0) {
 			return
 		}
 
-
+		// table names is path joined by _, we could change this standard
 		def tableName = it.path.join('_')
-		def tableDefinition  = []
-		flowFile = session.create()
-		flowFile = session.write(flowFile, {outputStream ->
-			// Create avro writer
-			DataFileWriter<GenericRecord> writer = new DataFileWriter<>(new GenericDatumWriter<GenericRecord>())
 
+		// create new flowfile for the table
+		flowFile = session.create()
+		// define flow file as of type outbound
+		flowFile = session.write(flowFile, {outputStream ->
 
 			def table = it
 			def columns = it.columns
 			// Add our generated primary and foreign keys
 			def pk,fk,keyNode
-			// Define table definition that can be used for creating Hive tables
+
+			// Define field array for the table
 			def fields = []
 
 			// get the foreign key for this table
@@ -277,8 +282,10 @@ try {
 				table.foreignKeyType = "xs:long"
 			}
 
+			// add primary and foreign key fields to fields list for the table
 			fields.add(getAvroField("apk",table.primaryKeyType, "null"))
 			fields.add(getAvroField("afk",table.foreignKeyType, "null"))
+
 			// We collect column name and types
 			// column names are made unique by including the path if it is a branch
 			it.columns.each {
@@ -288,42 +295,60 @@ try {
 				}
 				p.add(it.name)
 				it.fieldName = p.join('_')
+				// Add the field to avro fields list
 				fields.add(getAvroField(it.fieldName,it.type, "null"))
 			}
+
 			// Define avro schema for the table
+			// add all field definitions to the table
 			def tableSchemaObj = [
 				type:"record",
 				name:tableName,
 				namespace:"any.data",
 				fields:fields
 			]
+			// create a json blob for the schema
 			avroJsonSchema = new JsonBuilder(tableSchemaObj)
-			// Attache avro schema definition to flowfile
+
+			// Generate a Avro schema definition from avro json blob
 			avroSchema = new Schema.Parser().parse(avroJsonSchema.toString())
-			log.error("avroJsonSchema")
-			log.error(avroJsonSchema.toString())
+
+			// Create avro writer
+			DataFileWriter<GenericRecord> writer = new DataFileWriter<>(new GenericDatumWriter<GenericRecord>())
+			// Attache the avro schema to output stream
 			writer.create(avroSchema, outputStream)
-			log.error("After writer.create")
 
+			// We now have prepare our output stream with our avro writer and avro Schema
+
+			// Its time to push out avro records
+			// counter of number of rowns found in this table
 			countRows = 0
-
+			// We loop over all elements in this branch to collect all rows
 			getNodes(doc_xml,table.path).each
 			{
+				// do we have a primary key element or shall we use a timestamp
 				if (table.primaryKey) {
 					pk = it.@"${table.primaryKey}"
 				}
 				else {
+					// to make each row unique we combine the timestamp with row counter
+					// an alternative would be to have combined primary key of rown and timestamp as we then can use integers instead of strings
 					pk = "${timeStamp}_${countRows}"
 				}
+
 				// Create a new record
 				GenericRecord newAvroRecord = new GenericData.Record(avroSchema)
 				// populate the record with data
 				pk = trimValue(table.primaryKeyType,pk)
 				fk = trimValue(table.foreignKeyType,fk)
+
+				// populate record with keys
 				newAvroRecord.put("apk", pk)
 				newAvroRecord.put("afk", fk)
+				// Consider forsing UTF8 character settings
 				//newAvroRecord.put("afk", util.Utf8(fk))
 
+				//Lets populate the record with columns
 				countRows++
 
 				def record = it
@@ -341,16 +366,17 @@ try {
 						val = v.text()
 					}
 
+					// trim value and make it the corect data type
 					val = trimValue(it.type,val)
-					log.error(it.fieldName)
-					log.error(val.toString())
+					// populate record with column value
 					newAvroRecord.put(it.fieldName, val)
 				}
+
 				// Append a new record to avro file
-				log.error(newAvroRecord.toString())
 				writer.append(newAvroRecord)
 
 			}
+
 			//writer.appendAllFrom(reader, false)
 			// do not forget to close the avro writer
 			writer.close()
@@ -376,6 +402,12 @@ try {
 	}
 	session.transfer(flowFiles, REL_SUCCESS)
 } catch(e) {
-    log.error('Scripting error', e)
+    //log.error('Scripting error', e)
+		String str= e.getStackTrace().toString()
+
+		def pattern = ( str =~ /groovy.(\d+)./   )
+
+		log.error " Error at line number = " + pattern[0][1]
+
     session.transfer(flowFiles, REL_FAILURE)
 }
